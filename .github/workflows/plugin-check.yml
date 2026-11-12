@@ -1,0 +1,315 @@
+name: 插件检查
+
+on:
+  workflow_call:
+    inputs:
+      core-image:
+        description: 核心镜像（留空使用 scripts/lib.sh 的默认值）
+        required: false
+        type: string
+        default: ''
+      upgrade-from:
+        description: 冒烟“升级保数据”的起点（提交或 tag）；留空取最近的 tag
+        required: false
+        type: string
+        default: ''
+  # 手动入口：从“检查”工作流（check.yml）触发，或在模板仓库直接跑本工作流验证冒烟作业。
+  workflow_dispatch:
+    inputs:
+      core-image:
+        description: 核心镜像（留空使用 scripts/lib.sh 的默认值）
+        required: false
+        type: string
+        default: ''
+      upgrade-from:
+        description: 冒烟“升级保数据”的起点（提交或 tag）；留空取最近的 tag
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    steps:
+      # 可复用工作流检出的是调用方的插件仓库，不是套件仓库。
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # 只数代码行：空行和只有注释的行不算（去掉首尾空白后以注释符开头的行，以及 /* */ 块里的行），不做完整的语法分析。
+      # 超过 800 行警告，是该按职责拆的信号；超过 2000 行失败。不许为了缩短行数写难懂的代码：删注释、把多行挤成一行、
+      # 把穷举的 match 改成 _、缩短有意义的名字都不行。
+      - name: 源文件代码行数（超过 800 警告，超过 2000 失败）
+        shell: python
+        run: |
+          import os
+          import subprocess
+          import sys
+
+          WARN_LINES, FAIL_LINES = 800, 2000
+
+          def code_lines(path):
+              hash_comments = path.endswith(('.py', '.sh'))
+              count, in_block = 0, False
+              with open(path, encoding='utf-8', errors='replace') as source:
+                  for raw_line in source:
+                      line = raw_line.strip()
+                      if in_block:
+                          in_block = '*/' not in line
+                      elif not line:
+                          pass
+                      elif hash_comments:
+                          count += not line.startswith('#')
+                      elif line.startswith('/*'):
+                          in_block = '*/' not in line[2:]
+                      else:
+                          count += not line.startswith('//')
+              return count
+
+          paths = subprocess.check_output([
+              'git', 'ls-files', '-z', '--',
+              '*.rs', '*.py', '*.sh', '*.js', '*.ts', '*.go', '*.kt', '*.swift',
+          ]).split(b'\0')
+          failed = False
+          for raw_path in filter(None, paths):
+              path = os.fsdecode(raw_path)
+              lines = code_lines(path)
+              if lines > FAIL_LINES:
+                  print(f'{path!r}: {lines} 行代码（不算空行和注释，上限 {FAIL_LINES}），按职责拆开')
+                  failed = True
+              elif lines > WARN_LINES:
+                  print(f'::warning file={path}::{path} 有 {lines} 行代码（不算空行和注释），超过 {WARN_LINES}，按职责拆')
+          sys.exit(1 if failed else 0)
+      - name: ShellCheck
+        run: shellcheck scripts/*.sh
+      - name: dev.sh 的 logs 和 diag（假 docker，不用真的 Docker）
+        run: scripts/dev_test.sh
+      # 插件仓库是公开的，核心的设计记录（ADR）在私有仓库里，读者打不开：注释、README、NOTICE 里写编号只会留下死链，
+      # 要讲的道理直接写在原处。
+      - name: 不引用 ADR 编号
+        run: |
+          if git grep -nIE 'ADR-?[0-9]{2,4}'; then
+            echo "上面这些行引用了 ADR 编号：插件仓库是公开的，读者看不到 ADR，把要说的原因直接写出来。" >&2
+            exit 1
+          fi
+      # 机器名、内部脚本名、内网地址和会过时的状态词进了公开仓库就收不回来，PR 上先拦住；扫整个仓库，不只看改动。
+      - name: 公开仓库泄漏检查
+        shell: python
+        run: |
+          import fnmatch
+          import hashlib
+          import os
+          import re
+          import subprocess
+          import sys
+
+          # 机器名和内部脚本名按加盐哈希比对：名单本身写进公开仓库就是泄漏。哈希只防被搜索到，挡不住穷举短名字。
+          # 第一组只要单独出现就算；第二组是常见词或数字（版本号、端口、行号里到处都是），只在指机器的写法里算。
+          ALWAYS = {'5c166a6466e0133c', '1e73ad4544a12aaf', 'f40bafa815094acd', '220782975ac7828e',
+                    '5cb02949aa739e24', '87d0117601845764', '2e79e948c27bfe9d', '421c198ae436309f'}
+          IN_HOST_CONTEXT = ALWAYS | {'cd4ae7a244ba48a6', '1d057cd132164e22', '02862ab1a24b080f', '0f70910a30edd8cb'}
+          NAME = r'(?P<h>[A-Za-z0-9_-]+)'
+          HOST_CONTEXTS = [re.compile(p) for p in (
+              rf'\bssh\s+(?:-\S+\s+)*(?:[A-Za-z0-9_.-]+@)?{NAME}(?![A-Za-z0-9_.-])',  # ssh -4 <机器>、ssh user@<机器>
+              rf'(?<![A-Za-z0-9_./:-]){NAME}:[~/]',  # <机器>:~/路径（scp、rsync）
+              rf'@{NAME}(?![A-Za-z0-9_.@-])',  # user@<机器>
+              rf'(?i)\bhost(?:name)?(?:\s*[:=]\s*|\s+){NAME}(?![A-Za-z0-9_.-])',  # --host <机器>、host: <机器>
+              rf'[在到去]\s*{NAME}\s*[上里]',  # 在 <机器> 上
+          )]
+          TOKEN = re.compile(r'[A-Za-z0-9_][A-Za-z0-9_-]*')
+          NETWORKS = re.compile(
+              r'(?<![\w.])(?:192\.168\.\d{1,3}\.\d{1,3}|10\.\d{1,3}\.\d{1,3}\.\d{1,3}'
+              r'|100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d{1,3}\.\d{1,3}'  # Tailscale 用的 CGNAT 段
+              r'|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})(?![\w.]*\d)'
+          )
+          # 状态词只查文档和注释。排除“出现在”“实现在”之类的词，以及加引号的引用（规则本身会引这些词）；
+          # “还没”只在后面跟着开发进度类的动词时算，“用户还没配置过”这类描述运行时状态的照常写。
+          STATUS = re.compile(
+              r'(?<![“"「‘\'])(?:目前|(?<![出实表体])现在(?!\s*[+＋-])'
+              r'|还没(?:有)?(?:合入|合并|收|定稿|定|支持|实现|接入|上线|发布|做|写|适配|开放|提供|让))'
+          )
+
+
+          def digest(token):
+              return hashlib.sha256(f'wonton-leak:{token.lower()}'.encode()).hexdigest()[:16]
+
+
+          def leaked_name(line):
+              for token in TOKEN.findall(line):
+                  if any(digest(part) in ALWAYS for part in {token, *re.split(r'[-_]', token)}):
+                      return True
+              return any(digest(m.group('h')) in IN_HOST_CONTEXT for p in HOST_CONTEXTS for m in p.finditer(line))
+
+
+          def findings(path, line):
+              if leaked_name(line):
+                  yield '主机名或内部脚本名'
+              if NETWORKS.search(line):
+                  yield '内网地址'
+              stripped = line.lstrip()
+              if (path.endswith('.md') or stripped.startswith(('#', '//'))) and STATUS.search(line):
+                  yield '状态词（目前/现在/还没）'
+
+
+          def load_allow():
+              allow = []
+              if not os.path.exists('.leak-allow'):
+                  return allow
+              with open('.leak-allow', encoding='utf-8') as source:
+                  for number, raw in enumerate(source, 1):
+                      if not raw.strip() or raw.lstrip().startswith('#'):
+                          continue
+                      parts = [part.strip() for part in raw.rstrip('\n').split('|')]
+                      if len(parts) != 3 or not all(parts):
+                          sys.exit(f'.leak-allow:{number}: 格式是“路径 | 行内片段 | 原因”，三项都要写')
+                      allow.append([parts[0], parts[1], False])
+              return allow
+
+
+          def main():
+              allow = load_allow()
+              paths = subprocess.check_output(['git', 'ls-files', '-z']).split(b'\0')
+              failed = False
+              for raw_path in filter(None, paths):
+                  path = os.fsdecode(raw_path)
+                  if path == '.leak-allow' or not os.path.isfile(path):
+                      continue
+                  with open(path, 'rb') as source:
+                      data = source.read()
+                  if b'\0' in data[:8192]:
+                      continue
+                  for number, line in enumerate(data.decode('utf-8', errors='replace').splitlines(), 1):
+                      for kind in findings(path, line):
+                          entry = next((e for e in allow if fnmatch.fnmatch(path, e[0]) and e[1] in line), None)
+                          if entry:
+                              entry[2] = True
+                              continue
+                          failed = True
+                          print(f'::error file={path},line={number}::{kind}')
+                          print(f'{path}:{number}: [{kind}] {line.strip()}')
+              for pattern, fragment, used in allow:
+                  if not used:
+                      print(f'::warning file=.leak-allow::豁免没有命中任何行，删掉：{pattern} | {fragment}')
+              if failed:
+                  print('插件仓库是公开的：上面这些行带了机器名、内部脚本名、内网地址或会过时的状态词。'
+                        '示例地址用 192.0.2.10；确属误报的，在 .leak-allow 里按“路径 | 行内片段 | 原因”豁免。', file=sys.stderr)
+              sys.exit(1 if failed else 0)
+
+
+          main()
+      # 官方要求（镜像按摘要固定、健康检查、标签、许可证、作者、声明等）里，摘要要等发布流程推完镜像才写回
+      # compose，重建自家镜像的 PR 在发布前满足不了，所以 PR 上只跑非官方检查；官方要求由 publish.sh --official
+      # 在推镜像、写回摘要之后统一查。
+      - name: 插件包检查
+        env:
+          WONTON_CORE_IMAGE: ${{ inputs.core-image }}
+        run: scripts/check.sh
+      - name: Rust 格式、Clippy 和测试
+        if: ${{ hashFiles('Cargo.toml') != '' }}
+        run: |
+          rustup component add rustfmt clippy
+          cargo fmt --check
+          if [[ ! -f clippy.toml && ! -f .clippy.toml ]]; then
+            # Clippy 通过 CLIPPY_CONF_DIR 选择配置目录，而非通过环境变量设置单个阈值。
+            # https://doc.rust-lang.org/clippy/configuration.html
+            # https://doc.rust-lang.org/clippy/lint_configuration.html#too-many-lines-threshold
+            CLIPPY_CONF_DIR="$(mktemp -d "$RUNNER_TEMP/clippy.XXXXXX")"
+            export CLIPPY_CONF_DIR
+            printf 'too-many-lines-threshold = 100\n' > "$CLIPPY_CONF_DIR/clippy.toml"
+          fi
+          cargo clippy --all-targets -- -D warnings -W clippy::too_many_lines
+          cargo test
+
+  smoke:
+    # 依赖镜像的升级 PR 合并前要过端到端冒烟（scripts/dev.sh smoke，四项真实请求，不用 mock）。
+    # 判“Dependabot 的 PR”同时看 actor 和 PR 作者：Dependabot 自己 rebase 时 actor 是 dependabot[bot]，
+    # 但任何人往 Dependabot 分支推 commit 都会把 actor 顶掉，PR 作者不会变。
+    # Dependabot 的 PR 拿到的是只读令牌：这一步只检出和起本地容器，不用仓库密钥、不写仓库。
+    if: ${{ github.event_name == 'workflow_dispatch' || github.actor == 'dependabot[bot]' || github.event.pull_request.user.login == 'dependabot[bot]' }}
+    needs: check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      # 可复用工作流检出的是调用方的插件仓库，不是套件仓库。
+      # 要全量历史和 tag：smoke 用 git describe 找上一个发布 tag 测“升级保数据”，浅检出没有 tag，这一项会一直是 N/A。
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      # 出口代理：声明 network.egress 的插件经核心的出口容器出网，出口容器把流量转发到
+      # 这里起的转发代理；装时要出网的插件（如 openclaw 的 init 装 npm 包）没有它就装不上。
+      # 镜像和核心出口容器是同一个（gogost/gost，MIT，按摘要固定）。端口只绑 Docker 网桥的网关地址，
+      # 不对公网暴露。对不出网的插件没有副作用：核心只为声明了 egress 的插件网络接出口容器，
+      # smoke 配好代理后会先探测这条链路，不通时冒烟当场失败并写明原因。
+      - name: 起出口代理
+        run: |
+          gw="$(docker network inspect bridge --format '{{(index .IPAM.Config 0).Gateway}}')"
+          docker run -d --name wonton-ci-egress -p "${gw}:3128:3128" \
+            gogost/gost:3@sha256:f266f957c6e4f8d433ed23202a5745fa4969d08f3f0ef034fb9357345e16ad67 \
+            -L "http://:3128"
+          for i in $(seq 1 10); do
+            curl -fsS -x "http://${gw}:3128" -o /dev/null https://github.com && break
+            if [[ "$i" == 10 ]]; then docker logs wonton-ci-egress; exit 1; fi
+            sleep 1
+          done
+          echo "WONTON_DEV_EGRESS_PROXY=http://${gw}:3128" >> "$GITHUB_ENV"
+      - name: 端到端冒烟（装得上、网页打得开、用户身份能用、工具 Bot 调得到）
+        env:
+          WONTON_CORE_IMAGE: ${{ inputs.core-image }}
+          UPGRADE_FROM: ${{ inputs.upgrade-from }}
+        # 指定起点时在 runner 本地打一个 tag 交给 smoke，不推到仓库：公开仓库里的 tag 会和以后正式发版的版本号撞上。
+        run: |
+          if [[ -n "$UPGRADE_FROM" ]]; then
+            git tag -f smoke-upgrade-base "$UPGRADE_FROM"
+            scripts/dev.sh smoke --upgrade-from smoke-upgrade-base
+          else
+            scripts/dev.sh smoke
+          fi
+      # 拉镜像、健康检查、探测这些失败原因只在 .wonton/smoke.log 里，不打出来就没法分诊。
+      # 令牌和会话 cookie 按约定只进 .env 和 cookie 文件，不进日志；这里仍按键名掩掉
+      # credential 形态的值，防止哪个探测把带令牌的地址或响应原样打进来（sha256 摘要不受影响）。
+      - name: 冒烟日志末尾（失败时）
+        if: failure()
+        run: |
+          log=".wonton/smoke.log"
+          if [[ ! -s "$log" ]]; then
+            echo "（$log 不存在或为空：冒烟在写日志前就退出了）"
+            exit 0
+          fi
+          python3 - "$log" "$RUNNER_TEMP/smoke-redacted.log" <<'PY'
+          import re
+          import sys
+
+          src, dst = sys.argv[1], sys.argv[2]
+          # 键名允许带前缀（WONTON_SECRET_OWNER_PASSWORD、X-Auth-Token），键右侧要词边界。
+          keys = (r"(?:[\w.-]+[-_])?(?:client_secret|access_token|refresh_token|session_token|"
+                  r"api[-_]?key|password|passwd|secret|token|authorization)\b")
+          patterns = [
+              # Authorization: Bearer xxx 先掩，避免键值对规则把 "Bearer" 当值掩掉、令牌留下。
+              re.compile(r"(?i)(bearer\s+)(\S+)()"),
+              # key="value"
+              re.compile(rf"(?i)(\b{keys}\s*=\s*[\"'])([^\"']*)([\"'])"),
+              # key=value、key: value（URL 查询串、环境变量、YAML）
+              re.compile(rf"(?i)(\b{keys}\s*[:=]\s*)([^\s&\"']+)()"),
+          ]
+
+          def mask(m: re.Match) -> str:
+              prefix, value, suffix = m.group(1), m.group(2), m.group(3)
+              if value.startswith("${") or value.lower() == "bearer":
+                  return m.group(0)  # 变量引用和scheme词不是密钥，留着好排错
+              return f"{prefix}***{suffix}"
+
+          with open(dst, "w", encoding="utf-8") as out:
+              for line in open(src, encoding="utf-8", errors="replace"):
+                  for pat in patterns:
+                      line = pat.sub(mask, line)
+                  out.write(line)
+          PY
+          echo "== .wonton/smoke.log 末尾 80 行（已脱敏；完整日志见 artifact smoke-log）=="
+          tail -n 80 "$RUNNER_TEMP/smoke-redacted.log"
+      - name: 上传冒烟日志（失败时）
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: smoke-log
+          path: ${{ runner.temp }}/smoke-redacted.log
+          if-no-files-found: ignore
