@@ -16,7 +16,8 @@ use tokio::net::TcpListener;
 
 const DEFAULT_PORT: u16 = 8090;
 
-#[tokio::main]
+// 两个工作线程就够：查询都在一把锁后面排队，宿主机核多时按核数开线程会顶到 pids_limit。
+#[tokio::main(worker_threads = 2)]
 async fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let dir = data_dir();

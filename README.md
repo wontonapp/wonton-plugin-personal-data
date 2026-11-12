@@ -9,8 +9,9 @@
 | 路径 | 内容 |
 | --- | --- |
 | `docker-compose.yml` | 清单、存储服务、数据目录和健康检查 |
-| `src/` | 存储服务：SQLite、契约的六个接口、凭据命令 |
+| `images/store/src/` | 存储服务：SQLite、契约的六个接口、凭据命令 |
 | `images/store/Dockerfile` | 自建镜像，两段构建，运行镜像只有二进制 |
+| `Cargo.toml` | 工作区，把 `images/store` 的 crate 挂进来 |
 | `scripts/smoke-probes.sh` | 装好以后真写一条位置、再读回的探针 |
 | `screenshots/` | 商店详情页截图 |
 

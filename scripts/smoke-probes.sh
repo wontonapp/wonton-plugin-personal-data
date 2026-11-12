@@ -25,9 +25,11 @@ _store() {
   printf '%s' "$name"
 }
 
-# 凭据命令就是核心安装时用的那条：从标准输入拿值，写进数据库。探针自己签一把。
+# 凭据命令就是核心安装时用的那条：从标准输入拿值，写进数据库。探针自己签一把，把值打出来给下面的请求用。
 _key() { # <存储容器>
-  printf 'probe-key' | docker exec "$1" /app/personal-data credentials issue probe
+  local key="probe-$RANDOM"
+  printf '%s' "$key" | docker exec -i "$1" /app/personal-data credentials issue probe || return 1
+  printf '%s' "$key"
 }
 
 write_point() { # <存储容器> <凭据> <tid>：照契约写一个点

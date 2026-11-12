@@ -1,22 +1,3 @@
-[package]
-name = "personal-data"
-version = "0.1.0"
-edition = "2021"
-rust-version = "1.85"
-license = "MIT"
-publish = false
-
-[dependencies]
-# MIT。HTTP 服务。
-axum = "0.8.9"
-# MIT。SQLite 用 bundled 编译进二进制，运行镜像里不用装系统库。
-rusqlite = { version = "0.32.1", features = ["bundled"] }
-# MIT OR Apache-2.0。
-serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.145"
-# MIT。HTTP 服务运行时和 SIGTERM 收尾。
-tokio = { version = "1.48.0", features = ["rt-multi-thread", "macros", "net", "signal"] }
-
-[profile.release]
-# 镜像小一些；出错时仍要有行号就保留默认的 unwind 信息量过大，这里只去符号。
-strip = true
+[workspace]
+members = ["images/store"]
+resolver = "2"
