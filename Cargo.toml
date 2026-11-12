@@ -1,0 +1,3 @@
+[workspace]
+members = ["images/store"]
+resolver = "2"

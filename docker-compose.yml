@@ -1,78 +1,85 @@
-# 示例插件：nginx 显示一个网页，向登录的人问好。改成自己的应用见 https://github.com/wontonapp/wonton-docs/blob/main/develop.md#写插件。
+# 手机数据：手机的位置和健康数据存储。给家里的助手查、删、导出。
 services:
-  web:
-    # 镜像按摘要固定（多架构镜像写清单列表的摘要），标签只给人看。
-    image: nginx:1.31.8-alpine@sha256:713fc2ebfd92e8217db451477182ee91944b123d2b1ee9fd5a8c6e91ca6c3a11
+  store:
+    # 自建镜像，发布时由 scripts/publish.sh 换成清单摘要（多架构）。
+    image: ghcr.io/wontonapp/wonton-plugin-personal-data/store:0.1.0
+    # 以主人的 uid:gid 运行，${WONTON_APP_DATA} 的属主就是它。
+    user: "${PUID}:${PGID}"
     environment:
-      # 网关代登录：SSI 回显的 Remote-User 只信核心带来的。官方镜像启动时对 templates 目录里的
-      # *.template 做 envsubst，把下面的地址换进 nginx 配置（见 web/default.conf.template）。
-      WONTON_CORE_ADDRESS: ${WONTON_CORE_ADDRESS}
-    # 包里的文件经 configs 交给容器（核心在启动前写进去），不能用卷挂载。
-    configs:
-      - source: site
-        target: /etc/nginx/templates/default.conf.template
-      - source: page
-        target: /usr/share/nginx/html/index.html
-      - source: tokens
-        target: /usr/share/nginx/html/tokens.css
+      DATA_DIR: /data
+      # 根文件系统只读，SQLite 的临时文件放内存盘。
+      SQLITE_TMPDIR: /tmp
+    volumes:
+      # SQLite 数据库跟着插件的数据目录走：重装、升级都在，卸载加 purge 才删。
+      - "${WONTON_APP_DATA}:/data"
+    read_only: true
+    tmpfs:
+      - /tmp
+    # 一个进程加 SQLite，线程不多；内存上限拦住异常增长。
+    pids_limit: 64
+    mem_limit: 96M
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/healthz"]
+      # 查得动数据库才算可用，不只是进程活着。
+      test: ["CMD", "/app/personal-data", "health"]
       interval: 30s
       timeout: 5s
-      start_period: 30s
+      start_period: 10s
       start_interval: 1s
 
-configs:
-  site:
-    file: web/default.conf.template
-  page:
-    file: web/index.html
-  tokens:
-    file: web/tokens.css
-
 x-wonton:
-  spec: "0.6"
-  # 换成你自己的：反向域名形式，装上以后不能改。
-  id: app.example.hello
-  version: 0.1.1
+  spec: "0.13"
+  id: app.wonton.personal-data
+  version: 0.1.0
   kind: app
-  title: { zh: 你好, en: Hello }
-  description: { zh: 向登录的人问好的示例网页, en: An example page that greets whoever is signed in }
+  title: { zh: 手机数据, zh-Hant: 手機資料, ja: スマホのデータ, en: Phone Data }
+  description:
+    zh: 把手机上的位置和健康数据存在家里，让家里的助手能回答“我现在在哪”“这周睡得怎么样”。打开哪一项、哪个助手能看都由你决定。
+    zh-Hant: 把手機上的位置和健康資料存在家裡，讓家裡的助手能回答「我現在在哪」「這週睡得怎麼樣」。打開哪一項、哪個助手能看都由你決定。
+    ja: スマホの位置情報と健康データを家の中に保存し、家のアシスタントが「今どこにいる」「今週の睡眠はどうだった」に答えられるようにします。どの種類をオンにして、どのアシスタントに読ませるかはあなたが決めます。
+    en: Keeps your phone's location and health data at home so your household assistant can answer "where am I" or "how did I sleep this week". You decide which types are on and which assistants may read them.
   icon: icon.svg
   notices: [NOTICE]
-  screenshots: [screenshots/home.png]
-  author: { name: Example }
-  homepage: https://nginx.org
-  # 应用（这里是 nginx）的许可证；插件包自己的许可证写在仓库的 LICENSE 里。
-  license: BSD-2-Clause
+  author: { name: geraldpeng6, url: https://github.com/geraldpeng6 }
+  homepage: https://github.com/wontonapp/wonton-plugin-personal-data
+  # 应用是本仓库的 Rust 服务，许可证 MIT；插件包自己的许可证也写在 LICENSE。
+  license: MIT
   tags:
-    zh: [工具]
-    en: [Tools]
+    zh: [智能家居, 健康]
+    zh-Hant: [智慧家庭, 健康]
+    ja: [スマートホーム, 健康]
+    en: [Home, Health]
   about:
     zh: |
-      一个示例网页：登录以后，页面会向你问好。新建插件时可以照着改。
+      手机上的位置和环境助手不在一处：这个插件把手机同步来的位置点、步数、睡眠这些健康样本存在你自己的服务器上，助手要查历史、算“今天走了几步”时读这里。
+
+      数据按人分开存。谁的位置、哪个类型打开、哪些助手能读，都在 App 的“设置 → 手机数据”里定，默认全关。
+
+      保存期限按类型设，位置默认 30 天、健康默认 1 年，到期由这个插件删；也能导出成一份 JSON 带走。
+
+      位置点按 OwnTracks 的写法存，以后想同时记到 Dawarich 这类应用里也不用换格式。
     en: |
-      An example page: once you are signed in, the page says hello. Copy it as a starting point for a new plugin.
-  release_notes: { zh: 名字和说明更新。, en: Product name and description update. }
-  webui:
-    service: web
-    port: 80
-    # 示例页回显网关注入的用户名，见 https://github.com/wontonapp/wonton-docs/blob/main/plugin-spec.md#网关代登录sso-proxy。
-    sso: proxy
-    proxy:
-      headers:
-        Remote-User: "{user}"
-  # 能放进侧边栏“我的应用”的页面，见 https://github.com/wontonapp/wonton-docs/blob/main/plugin-spec.md#应用页面tabs。放不放由用户决定。
-  tabs:
-    - id: home
-      title: { zh: 主页, en: Home }
-      icon: tabs/home.svg
-      icon_selected: tabs/home-fill.svg
-      path: /
-      # 这个页面没做适配，用默认的 inset：从状态栏下沿开始，页面不用管安全区。
-      # 想让内容从状态栏后面滚过，写 layout: edge-to-edge，并用 --wonton-inset-* 留出系统安全区的位置。
+      Your phone's location and your assistant are not in the same place: this plugin keeps the location points and health samples (steps, sleep and the rest) that your phone syncs on your own server, and assistants read from here when they need history or "how many steps today".
+
+      Data is kept per person. Whose data, which types are on and which assistants may read them are all decided in the app under Settings → Phone data, off by default.
+
+      Retention is set per type, 30 days for location and a year for health by default, and this plugin deletes expired data. You can also export everything as one JSON file.
+
+      Location points are stored in the OwnTracks writing, so recording to apps like Dawarich later needs no format change.
+  release_notes:
+    zh: "第一版：存位置和健康样本，查询、删除、导出、按期限清理。"
+    zh-Hant: "第一版：存位置和健康樣本，查詢、刪除、匯出、按期限清理。"
+    ja: "最初の版：位置情報と健康サンプルの保存、検索、削除、エクスポート、保存期限による整理。"
+    en: "First version: stores location points and health samples, query, delete, export and retention cleanup."
   permissions: []
-  # 上游 nginx 官方镜像，amd64 和 arm64 都有；上游没写最低内存，按本机空闲实测取整（实测约 24M，取 64M）。
+  # 契约的路径和类型在核心仓库的 wonton-protocol；凭据按使用方签发，核心给每个使用方一把。
+  provides:
+    personal_data:
+      service: store
+      port: 8090
+      credentials:
+        issue: ["/app/personal-data", "credentials", "issue", "{name}"]
+        revoke: ["/app/personal-data", "credentials", "revoke", "{name}"]
+  # musl 静态二进制，两种架构都有；SQLite 常驻内存很小。
   requirements:
     arch: [amd64, arm64]
     memory: 64M

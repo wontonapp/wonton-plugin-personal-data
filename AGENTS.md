@@ -59,9 +59,8 @@
 
 1. `scripts/check.sh` 没有不合格，提醒都有原因。
 2. `scripts/dev.sh reinstall --yes` 装得上，`scripts/dev.sh status` 里是 `running healthy`。
-3. 浏览器打开插件网页：`sso: oidc` 或 `proxy` 验证自动登录；`sso: none` 验证首次注册管理员和应用自己的登录。
-   把插件的主要功能用一遍。没有浏览器时用 `scripts/dev.sh web <路径> [<curl 参数>…]` 通过核心网关请求网页和接口，
-   应用自己的登录仍需单独验证。
+3. 接口按契约走一遍。这个插件只有能力、没有网页，网页和身份两项冒烟会记 N/A，数据项真写一条点再读回：
+   `scripts/dev.sh smoke`。
 4. 写进数据的操作做一次，`scripts/dev.sh reinstall --yes` 以后数据还在；`scripts/dev.sh uninstall --purge` 以后数据
    删干净了（没有 `.wonton/data/apps/<slug>/`，`docker volume ls` 里没有它的卷）。
 
